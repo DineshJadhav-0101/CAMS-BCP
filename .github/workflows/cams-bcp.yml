@@ -1,0 +1,326 @@
+name: 🌐 CAMS APIM Switch(Website-api Backend URL's change + APIM Backends + Private DNS Zone Record update)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_apim_website_api_url_switch:
+        description: "Run APIM(IPRU-INC-UAT-DM-Zoho-API) ,API(Website-api) Operation Policy URL Switch?"
+        required: true
+        type: boolean
+      run_apim_prod_backends_url_switch:
+        description: "Run APIM(IPRU-INC-PROD-APIM) Backends URL Switch?"
+        required: true
+        type: boolean
+      run_dns_record_switch:
+        description: "Update Private DNS Zone with Respective IP?"
+        required: true
+        type: boolean
+      direction:
+        description: "Switch direction"
+        required: true
+        type: choice
+        options:
+          - prod-to-dr
+          - dr-to-prod
+
+env:
+  LOGS_STORAGE_ACCOUNT_KEY: ${{ secrets.LOGS_STORAGE_ACCOUNT_KEY }}
+  LOGS_STORAGE_ACCOUNT_NAME: ''
+  LOGS_CONTAINER_NAME: bcp-logs
+
+  ### APIM IPRU-INC-UAT-DM-Zoho-API
+  APIM_ONE_SUB_ID: ${{ secrets.AZURE_UAT_Subscription_ID }}
+  APIM_ONE_RG: 'IPRUINC-RG-UAT-DM'
+  APIM_ONE_NAME: 'IPRU-INC-UAT-DM-Zoho-API'
+  APIM_ONE_API_ID: ''
+
+  ### APIM IPRU-INC-PROD-APIM
+  APIM_TWO_SUB_ID: ${{ secrets.AZURE_Production_Subscription_ID }}
+  APIM_TWO_RG: 'IPRU-INC-PROD-APIM-RG'
+  APIM_TWO_NAME: 'IPRU-INC-PROD-APIM'
+  APIM_TWO_BACKEND_API_NAME: 'CamsEiscpBackend'   # comma-separated
+
+  ### URLs for switching
+  PROD_URL: "https://eiscp2.camsonline.com"
+  DR_URL: "https://eiscp3.camsonline.com"
+
+
+  # ENV Vars (Modify if needed)
+  DNS_RG: 
+  DNS_ZONE: 
+  RECORDSET: 
+  PROD_IP: 
+  DR_IP: 
+
+jobs:
+
+  apim_policy_switch:
+    runs-on: PROD-DT-FE1
+    if: ${{ github.event.inputs.run_apim_website_api_url_switch == 'true' }}
+
+    steps:
+    - name: 🧩 Prepare Log File
+      run: |
+        TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
+        LOG_FILE="apim_website_api_update_${TIMESTAMP}.log"
+        echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+        echo "[INFO] Log File Path: $LOG_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 👤 Triggered By: ${{ github.actor }}" | tee -a $LOG_FILE
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🟦 Starting APIM IPRU-INC-UAT-DM-Zoho-API Webiste-api URL Switch… " | tee -a $LOG_FILE
+    - name: 🔐 Azure Login (Logged)
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        log "🔐 Logging into Azure…"
+        if ! LOGIN_OUTPUT=$(az login --service-principal \
+            -u ${{ secrets.AZURE_CLIENT_ID }} \
+            -p ${{ secrets.AZURE_CLIENT_SECRET }} \
+            --tenant ${{ secrets.AZURE_TENANT_ID }} 2>&1); then
+          echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+          log "❌ Azure login failed!"
+          exit 1
+        fi
+        echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+        az account set --subscription ${{ secrets.AZURE_UAT_Subscription_ID }}
+        log "✅ Azure Login completed."
+    - name: 🔄 Execute APIM Policy Switch (Strict)
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        run_cmd(){
+          log "🛠 Running: $1"
+          if ! OUTPUT=$($1 2>&1 | tee -a "$LOG_FILE"); then
+            log "❌ Command failed!"
+            log "$OUTPUT"
+            exit 1
+          else
+            log "✅ Success"
+          fi
+        }
+        if [ "${{ github.event.inputs.direction }}" = "prod-to-dr" ]; then
+          SRC="$PROD_URL"
+          DEST="$DR_URL"
+          log "🔁 Direction: PROD ➜ DR"
+        else
+          SRC="$DR_URL"
+          DEST="$PROD_URL"
+          log "🔁 Direction: DR ➜ PROD"
+        fi
+        log "📌 Listing operations for API: $APIM_ONE_API_ID"
+        OPS=$(az apim api operation list \
+          --resource-group "$APIM_ONE_RG" \
+          --service-name "$APIM_ONE_NAME" \
+          --api-id "$APIM_ONE_API_ID" \
+          --query "[].name" -o tsv)
+        for OP in $OPS; do
+          log "🔍 Checking operation: $OP"
+          POLICY=$(az rest \
+              --method get \
+              --uri "https://management.azure.com/subscriptions/$APIM_ONE_SUB_ID/resourceGroups/$APIM_ONE_RG/providers/Microsoft.ApiManagement/service/$APIM_ONE_NAME/apis/$APIM_ONE_API_ID/operations/$OP/policies/policy?api-version=2021-08-01" \
+              --query "properties.value" -o tsv 2>/dev/null || echo "")
+          if [[ -z "$POLICY" ]]; then
+            log "⚪ No policy found → skipping"
+            continue
+          fi
+          if echo "$POLICY" | grep -q "$SRC"; then
+            log "🟡 URL Match Found → Replacing:"
+            log "    OLD: $SRC"
+            log "    NEW: $DEST"
+            echo "$POLICY" | sed "s|$SRC|$DEST|g" > updated.xml
+            CMD="az rest --method put \
+              --uri https://management.azure.com/subscriptions/$APIM_ONE_SUB_ID/resourceGroups/$APIM_ONE_RG/providers/Microsoft.ApiManagement/service/$APIM_ONE_NAME/apis/$APIM_ONE_API_ID/operations/$OP/policies/policy?api-version=2021-08-01 \
+              --headers Content-Type=application/vnd.ms-azure-apim.policy+xml If-Match=* \
+              --body @updated.xml"
+            run_cmd "$CMD"
+            log "🟢 Updated policy: $OP"
+          else
+            log "⚪ URL not found → skipping: $OP"
+          fi
+        done
+        log "✔ APIM Webiste-api Policy Switch Completed!"
+    - name: 🏷️ Rename Log File Based on Direction
+      run: |
+        NEW_NAME="${LOG_FILE%.log}_${{ github.event.inputs.direction }}.log"
+        mv "$LOG_FILE" "$NEW_NAME"
+        echo "LOG_FILE=$NEW_NAME" >> $GITHUB_ENV
+        echo "Renamed log file → $NEW_NAME"
+    - name: ☁️ Upload Log File (Policy)
+      if: always()
+      run: |
+        echo "Uploading log: $LOG_FILE"
+        az storage blob upload \
+          --account-name $LOGS_STORAGE_ACCOUNT_NAME \
+          --account-key $LOGS_STORAGE_ACCOUNT_KEY \
+          --container-name $LOGS_CONTAINER_NAME \
+          --file "$LOG_FILE" \
+          --overwrite
+  apim_backend_switch:
+    runs-on: PROD-DT-FE1
+    if: ${{ github.event.inputs.run_apim_prod_backends_url_switch == 'true' }}
+
+    steps:
+    - name: 🧩 Prepare Log File
+      run: |
+        TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
+        LOG_FILE="apim_backend_switch_${TIMESTAMP}.log"
+        echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+        echo "[INFO] Log File Path: $LOG_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 👤 Triggered By: ${{ github.actor }}" | tee -a $LOG_FILE
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🌍 Starting APIM IPRU-INC-PROD-APIM Backend URL Switch…" | tee -a $LOG_FILE
+    - name: 🔐 Azure Login (Logged)
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        log "🔐 Logging into Azure…"
+        if ! LOGIN_OUTPUT=$(az login --service-principal \
+            -u ${{ secrets.AZURE_CLIENT_ID }} \
+            -p ${{ secrets.AZURE_CLIENT_SECRET }} \
+            --tenant ${{ secrets.AZURE_TENANT_ID }} 2>&1); then
+          echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+          log "❌ Azure login failed!"
+          exit 1
+        fi
+        echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+        az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        log "✅ Azure Login completed."
+    - name: 🔄 Backend URL Switch
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        run_cmd(){
+          log "🛠 Running: $1"
+          if ! OUTPUT=$($1 2>&1 | tee -a "$LOG_FILE"); then
+            log "❌ Command failed!"
+            log "$OUTPUT"
+            exit 1
+          else
+            log "✅ Success"
+          fi
+        }
+        if [ "${{ github.event.inputs.direction }}" == "prod-to-dr" ]; then
+          URL="$DR_URL"
+          log "🔁 PROD ➜ DR (Backend URL: $URL)"
+        else
+          URL="$PROD_URL"
+          log "🔁 DR ➜ PROD (Backend URL: $URL)"
+        fi
+        BACKEND="$APIM_TWO_BACKEND_API_NAME"
+        log "🔍 Updating backend: $BACKEND"
+        log "📥 Fetching backend config"
+        az rest --method get \
+          --uri https://management.azure.com/subscriptions/$APIM_TWO_SUB_ID/resourceGroups/$APIM_TWO_RG/providers/Microsoft.ApiManagement/service/$APIM_TWO_NAME/backends/$BACKEND?api-version=2023-05-01-preview \
+          -o json > backend.json
+        log "📄 Saved backend.json"
+        cat backend.json | jq --arg U "$URL" '.properties.url = $U' > backend_updated.json
+        CMD="az rest --method put \
+          --uri https://management.azure.com/subscriptions/$APIM_TWO_SUB_ID/resourceGroups/$APIM_TWO_RG/providers/Microsoft.ApiManagement/service/$APIM_TWO_NAME/backends/$BACKEND?api-version=2023-05-01-preview \
+          --headers Content-Type=application/json \
+          --body @backend_updated.json"
+        run_cmd "$CMD"
+        log "✔ Backend Updated: $BACKEND"
+    - name: 🏷️ Rename Log File Based on Direction
+      run: |
+        NEW_NAME="${LOG_FILE%.log}_${{ github.event.inputs.direction }}.log"
+        mv "$LOG_FILE" "$NEW_NAME"
+        echo "LOG_FILE=$NEW_NAME" >> $GITHUB_ENV
+        echo "Renamed log file → $NEW_NAME"
+    - name: ☁️ Upload Log File (Backend)
+      if: always()
+      run: |
+        echo "Uploading log: $LOG_FILE"
+        az storage blob upload \
+          --account-name $LOGS_STORAGE_ACCOUNT_NAME \
+          --account-key $LOGS_STORAGE_ACCOUNT_KEY \
+          --container-name $LOGS_CONTAINER_NAME \
+          --file "$LOG_FILE" \
+          --overwrite
+  dns_record_switch:
+    runs-on: PROD-DT-FE1
+    if: ${{ github.event.inputs.run_dns_record_switch == 'true' }}
+
+    steps:
+    - name: 🧩 Prepare DNS Log File
+      run: |
+        TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
+        LOG_FILE="dns_record_switch_${TIMESTAMP}.log"
+        echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+        echo "[INFO] Log File Path: $LOG_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 👤 Triggered By: ${{ github.actor }}" | tee -a $LOG_FILE
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🌐 Starting Private DNS Record Update…" | tee -a $LOG_FILE
+    - name: 🔐 Azure Login
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        log "🔐 Logging into Azure…"
+        if ! LOGIN_OUTPUT=$(az login --service-principal \
+            -u ${{ secrets.AZURE_CLIENT_ID }} \
+            -p ${{ secrets.AZURE_CLIENT_SECRET }} \
+            --tenant ${{ secrets.AZURE_TENANT_ID }} 2>&1); then
+          echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+          log "❌ Azure login failed!"
+          exit 1
+        fi
+        echo "$LOGIN_OUTPUT" | tee -a "$LOG_FILE"
+        az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        log "✅ Azure Login completed."
+    - name: 🔄 Update Private DNS RecordSet
+      run: |
+        set -euo pipefail
+        log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+        run_cmd(){
+          log "🛠 Running: $1"
+          if ! OUTPUT=$($1 2>&1 | tee -a "$LOG_FILE"); then
+            log "❌ Command failed!"
+            log "$OUTPUT"
+            exit 1
+          else
+            log "✅ Success"
+          fi
+        }
+        if [ "${{ github.event.inputs.direction }}" == "prod-to-dr" ]; then
+          NEW_IP="$DR_IP"
+          OLD_IP="$PROD_IP"
+          log "🔁 Switching DNS: PROD ➜ DR"
+        else
+          NEW_IP="$PROD_IP"
+          OLD_IP="$DR_IP"
+          log "🔁 Switching DNS: DR ➜ PROD"
+        fi
+        log "📌 Updating A record in private zone:"
+        log "    Zone: $DNS_ZONE"
+        log "    Record: $RECORDSET"
+        log "    New IP: $NEW_IP"
+        # Remove old record
+        run_cmd "az network private-dns record-set a remove-record \
+          --resource-group $DNS_RG \
+          --zone-name $DNS_ZONE \
+          --record-set-name $RECORDSET \
+          --ipv4-address $OLD_IP"
+        # Add new record
+        run_cmd "az network private-dns record-set a add-record \
+          --resource-group $DNS_RG \
+          --zone-name $DNS_ZONE \
+          --record-set-name $RECORDSET \
+          --ipv4-address $NEW_IP"
+        run_cmd "az network private-dns record-set a update \
+          --resource-group $DNS_RG \
+          --zone-name $DNS_ZONE \
+          --name $RECORDSET \
+          --set ttl=60"
+        log "🌐 DNS Record Updated Successfully!"
+    - name: 🏷️ Rename Log File Based on Direction
+      run: |
+        NEW_NAME="${LOG_FILE%.log}_${{ github.event.inputs.direction }}.log"
+        mv "$LOG_FILE" "$NEW_NAME"
+        echo "LOG_FILE=$NEW_NAME" >> $GITHUB_ENV
+        echo "Renamed log file → $NEW_NAME"
+    - name: ☁️ Upload DNS Log File
+      if: always()
+      run: |
+        echo "[Uploading DNS log: $LOG_FILE]"
+        az storage blob upload \
+          --account-name $LOGS_STORAGE_ACCOUNT_NAME \
+          --account-key $LOGS_STORAGE_ACCOUNT_KEY \
+          --container-name $LOGS_CONTAINER_NAME \
+          --file "$LOG_FILE" \
+          --overwrite
