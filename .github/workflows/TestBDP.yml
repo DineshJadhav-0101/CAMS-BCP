@@ -1,62 +1,82 @@
-name: Update Backend URL
+name: Update APIM Backend URL
 
+# Trigger the workflow on push or manually
 on:
-  workflow_dispatch: # Allows manual triggering of the workflow
+  push:
+    branches:
+      - main   # or your main branch name
+  workflow_dispatch:   # Allows for manual trigger
 
 jobs:
-  update-url:
+  update-apim-backend-url:
     runs-on: ubuntu-latest
+
+    env:
+      # Define environment variables for the resource group, APIM service, old and new backend URLs
+      RESOURCE_GROUP: "Dinesh-Test-resource-Group"
+      APIM_SERVICE_NAME: "APIM-TESTNG"
+      OLD_BACKEND_URL: "https://dinesttest2.com"
+      NEW_BACKEND_URL: "https://dinesttest1.com"
+
     steps:
+      # Step 1: Checkout the repository code
       - name: Checkout code
         uses: actions/checkout@v2
 
+      # Step 2: Set up Azure CLI
       - name: Set up Azure CLI
-        uses: azure/setup-cli@v1
+        uses: azure/setup-azure-cli@v1
 
-      - name: Login to Azure
+      # Step 3: Azure Login using Service Principal
+      - name: Azure login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Run update script
+      # Step 4: Get the APIs and Operations in APIM and update the backend URL
+      - name: Update backend URL for API operations
         run: |
-          chmod +x ./update_backend_urls.sh
-          ./update_backend_urls.sh
+          # Use environment variables defined above
+          resource_group="${{ env.RESOURCE_GROUP }}"
+          apim_service_name="${{ env.APIM_SERVICE_NAME }}"
+          old_backend_url="${{ env.OLD_BACKEND_URL }}"
+          new_backend_url="${{ env.NEW_BACKEND_URL }}"
 
-          #!/bin/bash
+          # Output the values to check if they're correctly passed
+          echo "Resource Group: $resource_group"
+          echo "APIM Service Name: $apim_service_name"
+          echo "Old Backend URL: $old_backend_url"
+          echo "New Backend URL: $new_backend_url"
 
-# Variables
-RESOURCE_GROUP="IPRU-INC-PROD-APIM-RG"
-APIM_NAME="API Management services"
-API_NAME="WebsiteAPI-CamsProxy"
-PROD_URL="https://eiscp2.camsonline.com"
-DR_URL="https://eiscp3.camsonline.com"
+          # Get all APIs in the APIM instance
+          apis=$(az apim api list --resource-group $resource_group --service-name $apim_service_name --query "[].id" -o tsv)
 
-# Function to update backend URL for a specific operation
-update_backend_url() {
-    local operation_id=$1
-    echo "Updating operation: $operation_id"
-    az apim api operation update \
-        --resource-group $RESOURCE_GROUP \
-        --service-name $APIM_NAME \
-        --api-id $API_NAME \
-        --operation-id $operation_id \
-        --set "request.backendServiceUrl=$DR_URL"
-}
+          # Iterate through each API and its operations
+          for api in $apis; do
+              # Get all operations for the API
+              operations=$(az apim api operation list --resource-group $resource_group --service-name $apim_service_name --api-id $(basename $api) --query "[].id" -o tsv)
 
-# Get all operations for the API
-operations=$(az apim api operation list --resource-group $RESOURCE_GROUP --service-name $APIM_NAME --api-id $API_NAME --query "[].{id: operationId}" -o tsv)
+              # Iterate through each operation
+              for operation in $operations; do
+                  # Get the operation details
+                  operation_details=$(az apim api operation show --resource-group $resource_group --service-name $apim_service_name --api-id $(basename $api) --operation-id $(basename $operation) -o json)
 
-# Loop through each operation and update the backend URL
-for operation_id in $operations; do
-    # Check if the current backend URL is the production URL
-    current_url=$(az apim api operation show --resource-group $RESOURCE_GROUP --service-name $APIM_NAME --api-id $API_NAME --operation-id $operation_id --query "request.backendServiceUrl" -o tsv)
-    
-    if [[ "$current_url" == "$PROD_URL" ]]; then
-        update_backend_url $operation_id
-    else
-        echo "Operation $operation_id does not use the production URL. Skipping."
-    fi
-done
+                  # Extract the current backend URL
+                  current_backend_url=$(echo $operation_details | jq -r '.request.url')
 
-echo "All applicable operations updated to use DR backend URL."
+                  # If the backend URL matches the old one, update it
+                  if [ "$current_backend_url" == "$old_backend_url" ]; then
+                      echo "Updating backend URL for API: $(basename $api), Operation: $(basename $operation)"
+                      
+                      # Update the backend URL
+                      az apim api operation update \
+                          --resource-group $resource_group \
+                          --service-name $apim_service_name \
+                          --api-id $(basename $api) \
+                          --operation-id $(basename $operation) \
+                          --set request.url="$new_backend_url"
+                  fi
+              done
+          done
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
