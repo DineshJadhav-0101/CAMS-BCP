@@ -35,10 +35,10 @@ jobs:
       - name: Update backend URL for API operations
         run: |
           # Use environment variables defined above
-          resource_group="${{ env.RESOURCE_GROUP }}"
-          apim_service_name="${{ env.APIM_SERVICE_NAME }}"
-          old_backend_url="${{ env.OLD_BACKEND_URL }}"
-          new_backend_url="${{ env.NEW_BACKEND_URL }}"
+          resource_group="${{ env.RESOURCE_GROUP }}"\
+            --apim_service_name="${{ env.APIM_SERVICE_NAME }}"
+            --old_backend_url="${{ env.OLD_BACKEND_URL }}"
+            --new_backend_url="${{ env.NEW_BACKEND_URL }}"
 
           # Output the values to check if they're correctly passed
           echo "Resource Group: $resource_group"
