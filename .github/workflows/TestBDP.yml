@@ -28,10 +28,8 @@ jobs:
         uses: azure/setup-azure-cli@v1
 
       # Step 3: Azure Login using Service Principal
-      - name: Azure login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Azure Login
+        run: az login --service-principal --username ${{ secrets.AZURE_CLIENT_ID }} --password ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
 
       # Step 4: Get the APIs and Operations in APIM and update the backend URL
       - name: Update backend URL for API operations
