@@ -1,4 +1,4 @@
-name: 🌐 CAMS APIM Switch only(Website-api Backend URL's change + APIM Backends + Private DNS Zone Record update)
+name: 🌐 CAMS APIM Switch Test(Website-api Backend URL's change + APIM Backends + Private DNS Zone Record update)
 
 on:
   workflow_dispatch:
